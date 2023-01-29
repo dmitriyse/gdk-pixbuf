@@ -49,7 +49,8 @@
 typedef struct {
 	struct jpeg_source_mgr pub;   /* public fields */
 
-	JOCTET buffer[JPEG_PROG_BUF_SIZE];              /* start of buffer */
+//	JOCTET buffer[JPEG_PROG_BUF_SIZE];              /* start of buffer */
+	JOCTET * buffer;
 	long  skip_next;              /* number of bytes to skip next read */
 	
 } my_source_mgr;
@@ -155,15 +156,20 @@ explode_gray_into_buf (struct jpeg_decompress_struct *cinfo,
 	 */
 	w = cinfo->output_width;
 	for (i = cinfo->rec_outbuf_height - 1; i >= 0; i--) {
-		guchar *from, *to;
-		
+		guchar *from;
+		unsigned int * to;
 		from = lines[i] + w - 1;
-		to = lines[i] + (w - 1) * 3;
+		to = ((unsigned int *)lines[i]) + (w - 1);
 		for (j = w - 1; j >= 0; j--) {
-			to[0] = from[0];
-			to[1] = from[0];
-			to[2] = from[0];
-			to -= 3;
+			guchar gray_pixel = *from;
+			unsigned int color_pixel = 0xFF00;
+			color_pixel|=gray_pixel;
+			color_pixel<<=8;
+			color_pixel|=gray_pixel;
+			color_pixel<<=8;
+			color_pixel|=gray_pixel;
+			*to = color_pixel;
+			to--;
 			from--;
 		}
 	}
@@ -274,6 +280,7 @@ colorspace_name (const J_COLOR_SPACE jpeg_color_space)
 	    case JCS_UNKNOWN: return "UNKNOWN"; 
 	    case JCS_GRAYSCALE: return "GRAYSCALE"; 
 	    case JCS_RGB: return "RGB"; 
+	    case JCS_EXT_RGBX: return "RGBX"; 
 	    case JCS_YCbCr: return "YCbCr"; 
 	    case JCS_CMYK: return "CMYK"; 
 	    case JCS_YCCK: return "YCCK";
@@ -581,12 +588,19 @@ gdk_pixbuf__jpeg_image_load (FILE *f, GError **error)
 	/* parse exif data */
 	jpeg_parse_exif (&exif_context, &cinfo);
 	
-	jpeg_start_decompress (&cinfo);
+	if (cinfo.jpeg_color_space != JCS_CMYK){
+		cinfo.out_color_space == JCS_EXT_RGBX;
+	}
+
+	cinfo.dct_method = JDCT_FASTEST;
 	cinfo.do_fancy_upsampling = FALSE;
 	cinfo.do_block_smoothing = FALSE;
+	jpeg_start_decompress (&cinfo);
 
 	pixbuf = gdk_pixbuf_new (GDK_COLORSPACE_RGB, 
-				 cinfo.out_color_components == 4 ? TRUE : FALSE, 
+				 cinfo.out_color_components == 4 
+				 	|| cinfo.jpeg_color_space == JCS_RGB 
+					|| cinfo.jpeg_color_space == JCS_GRAYSCALE ? TRUE : FALSE, 
 				 8, cinfo.output_width, cinfo.output_height);
 	      
 	if (!pixbuf) {
@@ -656,6 +670,9 @@ gdk_pixbuf__jpeg_image_load (FILE *f, GError **error)
 		    case JCS_RGB:
 		      /* do nothing */
 		      break;
+			case JCS_EXT_RGBX:
+		      /* do nothing */
+			  break;
 		    case JCS_CMYK:
 		      convert_cmyk_to_rgb (&cinfo, lines);
 		      break;
@@ -708,6 +725,7 @@ static boolean
 fill_input_buffer (j_decompress_ptr cinfo)
 {
 	return FALSE;
+	//return TRUE;
 }
 
 
@@ -871,6 +889,9 @@ gdk_pixbuf__jpeg_image_load_lines (JpegProgContext  *context,
                 case JCS_RGB:
                         /* do nothing */
                         break;
+				case JCS_EXT_RGBX:
+						/* do nothing */
+						break;
                 case JCS_CMYK:
                         convert_cmyk_to_rgb (cinfo, lines);
                         break;
@@ -933,6 +954,7 @@ gdk_pixbuf__jpeg_image_load_increment (gpointer data,
 	g_return_val_if_fail (buf != NULL, FALSE);
 
 	src = (my_src_ptr) context->cinfo.src;
+    src->buffer = buf;
 
 	cinfo = &context->cinfo;
 
@@ -971,19 +993,20 @@ gdk_pixbuf__jpeg_image_load_increment (gpointer data,
 	spinguard = 0;
 	first = TRUE;
 	while (TRUE) {
-
 		/* handle any data from caller we haven't processed yet */
 		if (num_left > 0) {
 			if(src->pub.bytes_in_buffer && 
-			   src->pub.next_input_byte != src->buffer)
-				memmove(src->buffer, src->pub.next_input_byte,
-					src->pub.bytes_in_buffer);
+			   src->pub.next_input_byte != src->buffer){
+				// memmove(src->buffer, src->pub.next_input_byte,
+				// 	src->pub.bytes_in_buffer);
+			   }
 
 
-			num_copy = MIN (JPEG_PROG_BUF_SIZE - src->pub.bytes_in_buffer,
+			num_copy = MIN (size - src->pub.bytes_in_buffer,
 					num_left);
 
-			memcpy(src->buffer + src->pub.bytes_in_buffer, bufhd,num_copy);
+			// memcpy(src->buffer + src->pub.bytes_in_buffer, bufhd,num_copy);
+			src->buffer = bufhd - src->pub.bytes_in_buffer;
 			src->pub.next_input_byte = src->buffer;
 			src->pub.bytes_in_buffer += num_copy;
 			bufhd += num_copy;
@@ -1012,7 +1035,7 @@ gdk_pixbuf__jpeg_image_load_increment (gpointer data,
 		if (!context->got_header) {
 			int rc;
 			gboolean has_alpha;
-		
+
 			jpeg_save_markers (cinfo, JPEG_APP0+1, 0xffff);
 			jpeg_save_markers (cinfo, JPEG_APP0+2, 0xffff);
 			rc = jpeg_read_header (cinfo, TRUE);
@@ -1026,8 +1049,29 @@ gdk_pixbuf__jpeg_image_load_increment (gpointer data,
 			/* parse exif data */
 			jpeg_parse_exif (&exif_context, cinfo);
 		
-			width = cinfo->image_width;
-			height = cinfo->image_height;
+			// THIS IS HARDCODE!!! REWRITE ME!
+			// HAY JACK!
+			// ===================================
+			width = 512;
+			height = 512;
+			
+			cinfo->scale_num = 1;
+			for (cinfo->scale_denom = 2; cinfo->scale_denom <= 8; cinfo->scale_denom *= 2) {
+				jpeg_calc_output_dimensions (cinfo);
+				if (cinfo->output_width < width || cinfo->output_height < height) {
+					cinfo->scale_denom /= 2;
+					break;
+				}
+			}
+
+			jpeg_calc_output_dimensions (cinfo);
+
+			// width = cinfo->image_width;
+			// height = cinfo->image_height;
+			width = cinfo->output_width;
+			height = cinfo->output_height;
+            // ====================================
+			
 			if (context->size_func) {
 				(* context->size_func) (&width, &height, context->user_data);
 				if (width == 0 || height == 0) {
@@ -1040,15 +1084,15 @@ gdk_pixbuf__jpeg_image_load_increment (gpointer data,
 				}
 			}
 			
-			cinfo->scale_num = 1;
-			for (cinfo->scale_denom = 2; cinfo->scale_denom <= 8; cinfo->scale_denom *= 2) {
-				jpeg_calc_output_dimensions (cinfo);
-				if (cinfo->output_width < width || cinfo->output_height < height) {
-					cinfo->scale_denom /= 2;
-					break;
-				}
-			}
-			jpeg_calc_output_dimensions (cinfo);
+			// cinfo->scale_num = 1;
+			// for (cinfo->scale_denom = 2; cinfo->scale_denom <= 8; cinfo->scale_denom *= 2) {
+			// 	jpeg_calc_output_dimensions (cinfo);
+			// 	if (cinfo->output_width < width || cinfo->output_height < height) {
+			// 		cinfo->scale_denom /= 2;
+			// 		break;
+			// 	}
+			// }
+			// jpeg_calc_output_dimensions (cinfo);
 			
 
 			if (cinfo->output_components == 3) {
@@ -1057,7 +1101,7 @@ gdk_pixbuf__jpeg_image_load_increment (gpointer data,
 				has_alpha = TRUE;
 			} else if (cinfo->output_components == 1 &&
 				   cinfo->out_color_space == JCS_GRAYSCALE) {
-				has_alpha = FALSE;
+				has_alpha = TRUE;
 			} else {
 				g_set_error (error,
 					     GDK_PIXBUF_ERROR,
@@ -1066,6 +1110,11 @@ gdk_pixbuf__jpeg_image_load_increment (gpointer data,
 					     cinfo->output_components);
 				retval = FALSE;
 				goto out;
+			}
+
+			if (cinfo->jpeg_color_space != JCS_CMYK){
+				cinfo->out_color_space = JCS_EXT_RGBX;
+				has_alpha = TRUE;
 			}
 
 			context->pixbuf = gdk_pixbuf_new (GDK_COLORSPACE_RGB,
@@ -1130,10 +1179,12 @@ gdk_pixbuf__jpeg_image_load_increment (gpointer data,
 			int rc;			
 			
 			/* start decompression */
-			cinfo->buffered_image = cinfo->progressive_mode;
-			rc = jpeg_start_decompress (cinfo);
+			// Disabling progressive mode to speedup performance.
+			//cinfo->buffered_image = cinfo->progressive_mode;
+			cinfo->dct_method = JDCT_FASTEST;
 			cinfo->do_fancy_upsampling = FALSE;
 			cinfo->do_block_smoothing = FALSE;
+			rc = jpeg_start_decompress (cinfo);
 
 			if (rc == JPEG_SUSPENDED)
 				continue;

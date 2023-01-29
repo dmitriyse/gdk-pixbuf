@@ -40,7 +40,8 @@ setup_png_transformations(png_structp png_read_ptr, png_infop png_info_ptr,
         png_uint_32 width, height;
         int bit_depth, color_type, interlace_type, compression_type, filter_type;
         int channels;
-        
+        int forced_rgbx = FALSE;
+       
         /* Get the image info */
 
         /* Must check bit depth, since png_get_IHDR generates an 
@@ -93,7 +94,12 @@ setup_png_transformations(png_structp png_read_ptr, png_infop png_info_ptr,
                 /* Conceivably, png_set_packing() is a better idea;
                  * God only knows how libpng works
                  */
+        }else if (color_type == PNG_COLOR_TYPE_RGB && bit_depth == 8){
+                // Forcing RGBX
+                png_set_filler(png_read_ptr, 0xFF, PNG_FILLER_AFTER);
+                forced_rgbx = TRUE;
         }
+
 
         /* If we are 16-bit, convert to 8-bit */
         if (bit_depth == 16) {
@@ -121,6 +127,11 @@ setup_png_transformations(png_structp png_read_ptr, png_infop png_info_ptr,
                       &interlace_type,
                       &compression_type,
                       &filter_type);
+
+        // Ensure that pixbuf treat rgbx as rgba
+        if (forced_rgbx){
+                color_type = PNG_COLOR_TYPE_RGB_ALPHA;
+        }
 
         *width_p = width;
         *height_p = height;
